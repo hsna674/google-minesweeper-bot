@@ -11,6 +11,9 @@ parser.add_argument("--new", action="store_true", help="Start a new game")
 parser.add_argument(
     "--ongoing", action="store_false", dest="new_game", help="Play an ongoing game"
 )
+parser.add_argument(
+    "--debug", action="store_true", help="Save debug screenshots of the board"
+)
 parser.set_defaults(new_game=True)
 args = parser.parse_args()
 
@@ -29,8 +32,6 @@ width = right - left
 height = bottom - top
 tile_width = width // cols
 tile_height = height // rows
-
-save_debug_images = False
 
 color_map = {
     (231, 45, 23): 0,  # Flag
@@ -53,10 +54,10 @@ moves = -2
 
 
 def capture_screenshot(capture_number=1):
-    time.sleep(1)
+    time.sleep(0.8)
     region = (left, top, width, height)
     screenshot = pyautogui.screenshot(region=region)
-    if save_debug_images:
+    if args.debug:
         screenshot.save(f"minesweeper_capture_{capture_number}.png")
     return screenshot
 
