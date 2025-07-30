@@ -3,6 +3,13 @@ import random
 import time
 from pynput import keyboard
 import concurrent.futures
+import argparse
+
+parser = argparse.ArgumentParser(description="Minesweeper Bot Configuration")
+parser.add_argument("--new-game", action="store_true", help="Start a new game")
+parser.add_argument("--ongoing-game", action="store_false", dest="new_game", help="Play an ongoing game")
+parser.set_defaults(new_game=True)
+args = parser.parse_args()
 
 pyautogui.PAUSE = 0
 
@@ -436,7 +443,9 @@ if __name__ == "__main__":
     listener.daemon = True
     listener.start()
 
-    click_random_center_tile(tile_grid)
+    if args.new_game:
+        click_random_center_tile(tile_grid)
+
     time.sleep(0.5)
 
     move_number = 1
