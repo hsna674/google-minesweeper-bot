@@ -7,9 +7,9 @@ import argparse
 import collections
 
 parser = argparse.ArgumentParser(description="Minesweeper Bot Configuration")
-parser.add_argument("--new-game", action="store_true", help="Start a new game")
+parser.add_argument("--new", action="store_true", help="Start a new game")
 parser.add_argument(
-    "--ongoing-game", action="store_false", dest="new_game", help="Play an ongoing game"
+    "--ongoing", action="store_false", dest="new_game", help="Play an ongoing game"
 )
 parser.set_defaults(new_game=True)
 args = parser.parse_args()
@@ -418,7 +418,7 @@ def solve_constraints(variables, constraints, variable_counts):
         variables, key=lambda var: variable_counts.get(var, 0), reverse=True
     )
 
-    if len(variables) > 25:
+    if len(variables) > 50:
         print(f"CSP solver skipped on component: Too many variables ({len(variables)})")
         return []
 
@@ -504,6 +504,83 @@ def solve_constraints_concurrently(variables, constraints, variable_counts):
     return all_safe_tiles, all_mine_tiles
 
 
+def get_effective_tile_info(r, c, board):
+    if not (1 <= board[r][c] <= 8):
+        return None, None
+
+    val = board[r][c]
+    neighbors = get_neighbors(r, c, board)
+
+    flagged_count = 0
+    unopened_neighbors = []
+
+    for nr, nc in neighbors:
+        if board[nr][nc] == 0:  # Flagged
+            flagged_count += 1
+        elif board[nr][nc] == 99:  # Unopened
+            unopened_neighbors.append((nr, nc))
+
+    effective_value = val - flagged_count
+    return effective_value, set(unopened_neighbors)
+
+
+def recognize_and_apply_patterns(board, tile_grid):
+    made_move = False
+    safes_to_click = set()
+    mines_to_flag = set()
+
+    for r1 in range(rows):
+        for c1 in range(cols):
+            val1 = board[r1][c1]
+            if not (1 <= val1 <= 8):
+                continue
+
+            rem_mines1, unopened1 = get_effective_tile_info(r1, c1, board)
+            if not unopened1:
+                continue
+
+            for r2, c2 in get_neighbors(r1, c1, board):
+                val2 = board[r2][c2]
+                if not (1 <= val2 <= 8):
+                    continue
+
+                rem_mines2, unopened2 = get_effective_tile_info(r2, c2, board)
+                if not unopened2:
+                    continue
+
+                if unopened2.issubset(unopened1) and unopened1 != unopened2:
+                    difference = unopened1 - unopened2
+                    mine_diff = rem_mines1 - rem_mines2
+
+                    if mine_diff == 0:
+                        for tile in difference:
+                            if board[tile[0]][tile[1]] == 99:
+                                safes_to_click.add(tile)
+
+                    if mine_diff == len(difference):
+                        for tile in difference:
+                            if board[tile[0]][tile[1]] == 99:
+                                mines_to_flag.add(tile)
+
+    if safes_to_click:
+        print(f"Pattern Recognition found safe tiles: {safes_to_click}")
+        for r, c in safes_to_click:
+            if board[r][c] == 99:
+                left_click_tile(tile_grid, r, c)
+                board[r][c] = -2  # Mark as clicked
+                made_move = True
+
+    if mines_to_flag:
+        print(f"Pattern Recognition found mines: {mines_to_flag}")
+        for r, c in mines_to_flag:
+            if board[r][c] == 99:
+                right_click_tile(tile_grid, r, c)
+                board[r][c] = 0  # Mark as flagged
+                made_move = True
+
+    return made_move
+
+
 if __name__ == "__main__":
     print(
         "Starting Minesweeper bot in 3 sec... Press ESC to stop. (Do not move mouse during execution!)"
@@ -538,8 +615,11 @@ if __name__ == "__main__":
         move_made = process_board(board_state, tile_grid)
 
         if not move_made:
+            move_made = recognize_and_apply_patterns(board_state, tile_grid)
+
+        if not move_made:
             print(
-                "No deterministic moves found. Trying Constraint Satisfaction solver..."
+                "No deterministic or pattern-based moves found. Trying Constraint Satisfaction solver..."
             )
             variables, constraints, variable_counts = collect_constraints(board_state)
 
