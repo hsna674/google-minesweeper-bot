@@ -358,7 +358,7 @@ def solve_constraints(variables, constraints):
     solutions = []
     assignment = {}
 
-    if len(variables) > 50:
+    if len(variables) > 100:
         print(
             f"CSP solver skipped: Too many variables ({len(variables)}) to solve in a reasonable time."
         )
