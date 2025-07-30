@@ -4,10 +4,13 @@ import time
 from pynput import keyboard
 import concurrent.futures
 import argparse
+import collections
 
 parser = argparse.ArgumentParser(description="Minesweeper Bot Configuration")
 parser.add_argument("--new-game", action="store_true", help="Start a new game")
-parser.add_argument("--ongoing-game", action="store_false", dest="new_game", help="Play an ongoing game")
+parser.add_argument(
+    "--ongoing-game", action="store_false", dest="new_game", help="Play an ongoing game"
+)
 parser.set_defaults(new_game=True)
 args = parser.parse_args()
 
@@ -288,9 +291,50 @@ def guess_least_risky_tile(board):
     return None
 
 
+def find_connected_components(variables, constraints):
+    if not variables:
+        return []
+
+    adj = collections.defaultdict(list)
+    for var_tuple, _ in constraints:
+        for i in range(len(var_tuple)):
+            for j in range(i + 1, len(var_tuple)):
+                u, v = var_tuple[i], var_tuple[j]
+                adj[u].append(v)
+                adj[v].append(u)
+
+    components = []
+    visited = set()
+    for var in variables:
+        if var not in visited:
+            component_vars = set()
+            q = collections.deque([var])
+            visited.add(var)
+            while q:
+                current_var = q.popleft()
+                component_vars.add(current_var)
+                if current_var in adj:
+                    for neighbor in adj[current_var]:
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            q.append(neighbor)
+
+            component_constraints = []
+            for constraint_vars, required_mines in constraints:
+                if any(v in component_vars for v in constraint_vars):
+                    component_constraints.append((constraint_vars, required_mines))
+
+            final_component_vars = sorted(list(component_vars))
+            components.append((final_component_vars, component_constraints))
+
+    print(f"Split problem into {len(components)} independent component(s).")
+    return components
+
+
 def collect_constraints(board):
     unopened_neighbors_of_numbers = set()
     constraints = []
+    variable_counts = collections.defaultdict(int)
 
     for r in range(rows):
         for c in range(cols):
@@ -308,13 +352,14 @@ def collect_constraints(board):
                         flagged_count += 1
 
                 if unopened_in_constraint:
+                    constraint_vars = tuple(sorted(unopened_in_constraint))
                     required_mines = val - flagged_count
-                    constraints.append(
-                        (tuple(sorted(unopened_in_constraint)), required_mines)
-                    )
+                    constraints.append((constraint_vars, required_mines))
+                    for var in constraint_vars:
+                        variable_counts[var] += 1
 
     variables = sorted(list(unopened_neighbors_of_numbers))
-    return variables, constraints
+    return variables, list(set(constraints)), variable_counts
 
 
 def check_consistency(assignment, constraints):
@@ -352,30 +397,36 @@ def backtracking_solver(variable_index, assignment, variables, constraints, solu
     backtracking_solver(
         variable_index + 1, assignment, variables, constraints, solutions
     )
+    if len(solutions) > 1000:
+        return
 
     assignment[current_variable] = "safe"
     backtracking_solver(
         variable_index + 1, assignment, variables, constraints, solutions
     )
+    if len(solutions) > 1000:
+        return
 
     del assignment[current_variable]
 
 
-def solve_constraints(variables, constraints):
+def solve_constraints(variables, constraints, variable_counts):
     solutions = []
     assignment = {}
 
-    if len(variables) > 100:
-        print(
-            f"CSP solver skipped: Too many variables ({len(variables)}) to solve in a reasonable time."
-        )
+    sorted_variables = sorted(
+        variables, key=lambda var: variable_counts.get(var, 0), reverse=True
+    )
+
+    if len(variables) > 25:
+        print(f"CSP solver skipped on component: Too many variables ({len(variables)})")
         return []
 
     print(
-        f"Running CSP solver on {len(variables)} variables and {len(constraints)} constraints..."
+        f"Running CSP solver on a component with {len(variables)} variables and {len(constraints)} constraints..."
     )
-    backtracking_solver(0, assignment, variables, constraints, solutions)
-    print(f"CSP solver found {len(solutions)} solution(s).")
+    backtracking_solver(0, assignment, sorted_variables, constraints, solutions)
+    print(f"CSP solver found {len(solutions)} solution(s) for this component.")
     return solutions
 
 
@@ -385,6 +436,12 @@ def analyze_solutions(solutions, variables):
 
     guaranteed_safes = []
     guaranteed_mines = []
+
+    if len(solutions) > 1000:
+        print(
+            "Warning: Analysis skipped as the number of solutions exceeded the limit."
+        )
+        return [], []
 
     for var in variables:
         if all(sol.get(var) == "safe" for sol in solutions):
@@ -418,14 +475,33 @@ def process_tile(args):
     return row, col, value, tile_data
 
 
-def solve_constraints_concurrently(variables, constraints):
+def solve_constraints_concurrently(variables, constraints, variable_counts):
+    components = find_connected_components(variables, constraints)
+
+    all_safe_tiles = []
+    all_mine_tiles = []
+
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(solve_constraints, variables, constraints)
-        try:
-            return future.result(timeout=10)
-        except concurrent.futures.TimeoutError:
-            print("CSP solver timed out.")
-            return []
+        future_to_component = {
+            executor.submit(
+                solve_constraints, comp_vars, comp_consts, variable_counts
+            ): (comp_vars)
+            for comp_vars, comp_consts in components
+        }
+
+        for future in concurrent.futures.as_completed(future_to_component):
+            component_vars = future_to_component[future]
+            try:
+                solutions = future.result()
+                if solutions:
+                    safe_tiles, mine_tiles = analyze_solutions(
+                        solutions, component_vars
+                    )
+                    all_safe_tiles.extend(safe_tiles)
+                    all_mine_tiles.extend(mine_tiles)
+            except Exception as exc:
+                print(f"A component generated an exception: {exc}")
+    return all_safe_tiles, all_mine_tiles
 
 
 if __name__ == "__main__":
@@ -465,13 +541,14 @@ if __name__ == "__main__":
             print(
                 "No deterministic moves found. Trying Constraint Satisfaction solver..."
             )
-            variables, constraints = collect_constraints(board_state)
+            variables, constraints, variable_counts = collect_constraints(board_state)
 
             if not variables:
                 print("No constraints found for solver.")
             else:
-                solutions = solve_constraints_concurrently(variables, constraints)
-                safe_tiles, mine_tiles = analyze_solutions(solutions, variables)
+                safe_tiles, mine_tiles = solve_constraints_concurrently(
+                    variables, constraints, variable_counts
+                )
 
                 if safe_tiles:
                     print(f"CSP found guaranteed safe tiles: {safe_tiles}")
